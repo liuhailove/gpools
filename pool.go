@@ -1,6 +1,7 @@
 package gpools
 
 import (
+	"github.com/liuhailove/gpools/internal"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -117,27 +118,42 @@ func NewPool(size int, options ...Option) (*Pool, error) {
 
 // Submit 向池中提交一个task
 func (p *Pool) Submit(task func()) error {
-
+	if p.IsClosed() {
+		return ErrPoolClosed
+	}
+	var w *goWorker
+	if w = p.retrieveWorker(); w == nil {
+		return ErrPoolOverload
+	}
+	w.task <- task
+	return nil
 }
 
 // Running 当前运行的协程数量
 func (p *Pool) Running() int {
-
+	return int(atomic.LoadInt32(&p.running))
 }
 
 // Free 返回工作队列中的可用的协程数，-1代表没有限制
 func (p *Pool) Free() int {
-
+	c := p.Cap()
+	if c < 0 {
+		return -1
+	}
+	return c - p.Running()
 }
 
 // Cap 返回池的容量
 func (p *Pool) Cap() int {
-
+	return int(atomic.LoadInt32(&p.capacity))
 }
 
 // Tune 改变池的容量，注意对于无限的pool或者pre-allocation pool是无效的
 func (p *Pool) Tune(size int) {
-
+	if capacity := p.Cap(); capacity == -1 || size <= 0 || size == capacity || p.options.PreAlloc {
+		return
+	}
+	atomic.StoreInt32(&p.capacity, int32(size))
 }
 
 func (p *Pool) IsClosed() bool {
@@ -146,12 +162,19 @@ func (p *Pool) IsClosed() bool {
 
 // Release 关闭这个缓冲池，同时释放工作队列
 func (p *Pool) Release() {
-
+	atomic.StoreInt32(&p.state, CLOSED)
+	p.lock.Lock()
+	p.workers.reset()
+	p.lock.Unlock()
+	// 此时有可能一些调用方在等待retrieveWorkers()，所以我们需要唤醒他们，避免他们无穷的等待
+	p.cond.Broadcast()
 }
 
 // Reboot 重启一个关闭的池
 func (p *Pool) Reboot() {
-
+	if atomic.CompareAndSwapInt32(&p.state, CLOSED, OPENED) {
+		go p.purgePeriodically()
+	}
 }
 
 // ---------------------------------------------------------------------------
