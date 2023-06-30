@@ -36,7 +36,7 @@ type Pool struct {
 	options *Options
 }
 
-// purgePeriodically 在一个独立的协程中清理国旗的workers,是一个清道夫协程
+// purgePeriodically 在一个独立的协程中清理过期的workers,是一个清道夫协程
 func (p *Pool) purgePeriodically() {
 	heartbeat := time.NewTicker(p.options.ExpiryDuration)
 	defer heartbeat.Stop()
