@@ -26,12 +26,19 @@ const (
 )
 
 var (
-	// Error types for the Ants API.
+	// MaxTime 最大时间
+	MaxTime = time.Unix(1<<63-62135596801, 999999999)
+)
+
+var (
+	// Error types for the GPools API.
 	//---------------------------------------------------------------------------
 
 	// ErrInvalidPoolSize will be returned when setting a negative number as pool capacity, this error will be only used
 	// by pool with func because pool without func can be infinite by setting up a negative capacity.
 	ErrInvalidPoolSize = errors.New("invalid size for pool")
+
+	ErrInvalidQueueSize = errors.New("invalid size for queue size")
 
 	// ErrLackPoolFunc will be returned when invokers don't provide function for pool.
 	ErrLackPoolFunc = errors.New("must provide function for pool")
@@ -43,7 +50,7 @@ var (
 	ErrPoolClosed = errors.New("this pool has been closed")
 
 	// ErrPoolOverload will be returned when the pool is full and no workers available.
-	ErrPoolOverload = errors.New("too many goroutines blocked on submit or Nonblocking is set")
+	ErrPoolOverload = errors.New("too many goroutines blocked on submit")
 
 	// ErrInvalidPreAllocSize will be returned when trying to set up a negative capacity under PreAlloc mode.
 	ErrInvalidPreAllocSize = errors.New("can not set up a negative capacity under PreAlloc mode")
@@ -67,12 +74,6 @@ var (
 	// Init a instance pool when importing GPools.
 	defaultGPool, _ = NewPool(DefaultGPoolSize)
 )
-
-// Logger 用于日志格式化输出
-type Logger interface {
-	// Printf 需要和log.Printf保持相同语义
-	Printf(format string, args ...interface{})
-}
 
 // Submit 向pool中提交一个task
 func Submit(task func()) error {

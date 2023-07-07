@@ -33,8 +33,8 @@ func newWorkerArray(aType arrayType, size int) workerArray {
 	switch aType {
 	case stackType:
 		return newWorkerStack(size)
-	case loopQueueType:
-		return newWorkerLoopQueue(size)
+	//case loopQueueType:
+	//	return newWorkerLoopQueue(size)
 	default:
 		return newWorkerStack(size)
 	}

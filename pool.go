@@ -2,6 +2,7 @@ package gpools
 
 import (
 	"github.com/liuhailove/gpools/internal"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -9,8 +10,17 @@ import (
 
 // Pool 接收客户端的请求，通过循环利用协程，以便限制协程数量为设置的协程数量
 type Pool struct {
-	// capacity 协程池容量，如果为负数，则表示没有限制
-	capacity int32
+	// corePoolSize 核心协程数，即便空闲也不会被回收
+	corePoolSize int32
+
+	// maximumPoolSize 池中的最大协程数，当空闲时会回收
+	maximumPoolSize int32
+
+	// maximumQueueSize 最大阻塞队列数，在没有核心线程可以申请时，task会优先进入到阻塞队列
+	maximumQueueSize int32
+
+	// 阻塞的任务
+	jobQueue chan func()
 
 	// running 当前运行的协程池数量
 	running int32
@@ -18,7 +28,10 @@ type Pool struct {
 	// lock 用于工作队列保护
 	lock sync.Locker
 
-	// workers 存储可用的 workers 分片
+	// submitLock 用于提交保护
+	submitLock sync.Locker
+
+	// workers 存储可用的 workers 分片，maximumPoolSize
 	workers workerArray
 
 	// state 用于通知关闭池自身
@@ -29,9 +42,6 @@ type Pool struct {
 
 	// workerCache 在函数:retrieveWorker中加快获取可用的worker
 	workerCache sync.Pool
-
-	// blockingNum 已经阻塞到pool.Submit的协程数，通过锁pool.lock保护
-	blockingNum int
 
 	options *Options
 }
@@ -69,11 +79,11 @@ func (p *Pool) purgePeriodically() {
 }
 
 // NewPool 生成一个 gpools 的实例
-func NewPool(size int, options ...Option) (*Pool, error) {
+func NewPool(corePoolSize int, options ...Option) (*Pool, error) {
 	opts := loadOptions(options...)
 
-	if size <= 0 {
-		size = -1
+	if corePoolSize <= 0 {
+		return nil, ErrInvalidPoolSize
 	}
 
 	if expiry := opts.ExpiryDuration; expiry < 0 {
@@ -82,15 +92,33 @@ func NewPool(size int, options ...Option) (*Pool, error) {
 		opts.ExpiryDuration = DefaultCleanIntervalTime
 	}
 
+	// 最大协程数不能小于核心协程数
+	if maximumPoolSize := opts.MaximumPoolSize; maximumPoolSize <= corePoolSize {
+		opts.MaximumPoolSize = corePoolSize
+	}
+
+	// 最大缓冲队列不能小于0
+	if maximumQueueTasks := opts.MaximumQueueTasks; maximumQueueTasks < 0 {
+		return nil, ErrInvalidQueueSize
+	}
+
 	if opts.Logger == nil {
 		opts.Logger = defaultLogger
 	}
 
 	p := &Pool{
-		capacity: int32(size),
-		lock:     internal.NewSpinLock(),
-		options:  opts,
+		corePoolSize:     int32(corePoolSize),
+		maximumPoolSize:  int32(opts.MaximumPoolSize),
+		maximumQueueSize: int32(opts.MaximumQueueTasks),
+		lock:             internal.NewSpinLock(),
+		submitLock:       internal.NewSpinLock(),
+		options:          opts,
 	}
+
+	if opts.MaximumQueueTasks > 0 {
+		p.jobQueue = make(chan func(), opts.MaximumQueueTasks)
+	}
+
 	p.workerCache.New = func() interface{} {
 		return &goWorker{
 			pool: p,
@@ -98,10 +126,10 @@ func NewPool(size int, options ...Option) (*Pool, error) {
 		}
 	}
 	if p.options.PreAlloc {
-		if size == -1 {
+		if corePoolSize == -1 {
 			return nil, ErrInvalidPreAllocSize
 		}
-		p.workers = newWorkerArray(loopQueueType, size)
+		p.workers = newWorkerArray(loopQueueType, corePoolSize)
 	} else {
 		p.workers = newWorkerArray(stackType, 0)
 	}
@@ -111,7 +139,39 @@ func NewPool(size int, options ...Option) (*Pool, error) {
 	// 开启一个协程，以便定时清理过期的任务
 	go p.purgePeriodically()
 
+	// 队列任务分发
+	go p.dispatch()
+
 	return p, nil
+}
+
+// dispatch 监听jobQueue并使用workers处理任务
+func (p *Pool) dispatch() {
+	for {
+		select {
+		case job := <-p.jobQueue:
+			var w *goWorker
+			w = p.utilRetrieveWorker(true)
+			// 执行任务
+			w.task <- job
+		default:
+			return
+		}
+	}
+}
+
+func (p *Pool) utilRetrieveWorker(isCore bool) *goWorker {
+	var w *goWorker
+	for {
+		// 找到一个worker
+		if w = p.retrieveWorker(isCore); w != nil {
+			// Got job
+			return w
+		} else {
+			//让出时间片，先让别的协议执行，它执行完，再回来执行此协程
+			runtime.Gosched()
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -121,12 +181,37 @@ func (p *Pool) Submit(task func()) error {
 	if p.IsClosed() {
 		return ErrPoolClosed
 	}
-	var w *goWorker
-	if w = p.retrieveWorker(); w == nil {
-		return ErrPoolOverload
+	// 如果运行线程数小于pool的池数量，则直接申请一个协程运行任务
+	if p.Running() < int(p.corePoolSize) {
+		p.submitLock.Lock()
+		defer p.submitLock.Unlock()
+		// 需要再次判断，多个协程可能同步满足if条件
+		// 如果double check时不满足，需要进一步判断阻塞队列及最大协程条件
+		if p.Running() < int(p.corePoolSize) {
+			var w = p.utilRetrieveWorker(true)
+			w.task <- task
+			return nil
+		}
 	}
-	w.task <- task
-	return nil
+	// 如果阻塞队列可以继续放入任务，则放到阻塞队列中，否则报错
+	if len(p.jobQueue) < int(p.maximumQueueSize) {
+		p.jobQueue <- task
+		return nil
+	}
+	// 如果运行线程数小于pool的最大协程数量，则直接申请一个协程运行任务
+	if p.Running() < int(p.maximumPoolSize) {
+		p.submitLock.Lock()
+		defer p.submitLock.Unlock()
+		// 需要再次判断，多个协程可能同步满足if条件
+		// 如果double check时不满足，则返回池满
+		if p.Running() < int(p.maximumPoolSize) {
+			var w = p.utilRetrieveWorker(false)
+			w.task <- task
+			return nil
+		}
+	}
+	// 如果运行的协程数已经等于Pool的最大协程数，则返回池已经满
+	return ErrPoolOverload
 }
 
 // Running 当前运行的协程数量
@@ -143,17 +228,14 @@ func (p *Pool) Free() int {
 	return c - p.Running()
 }
 
-// Cap 返回池的容量
+// Cap 返回池的容量 maximumPoolSize
 func (p *Pool) Cap() int {
-	return int(atomic.LoadInt32(&p.capacity))
+	return int(atomic.LoadInt32(&p.maximumPoolSize))
 }
 
-// Tune 改变池的容量，注意对于无限的pool或者pre-allocation pool是无效的
-func (p *Pool) Tune(size int) {
-	if capacity := p.Cap(); capacity == -1 || size <= 0 || size == capacity || p.options.PreAlloc {
-		return
-	}
-	atomic.StoreInt32(&p.capacity, int32(size))
+// CorePoolSize 返回核心池容量
+func (p *Pool) CorePoolSize() int {
+	return int(atomic.LoadInt32(&p.corePoolSize))
 }
 
 func (p *Pool) IsClosed() bool {
@@ -190,81 +272,69 @@ func (p *Pool) decRunning() {
 }
 
 // retrieveWorker 返回一个可用的worker，以便运行tasks
-func (p *Pool) retrieveWorker() (w *goWorker) {
-	spawnWorker := func() {
+// isCore 是否仅仅申请核心线程，在阻塞队列没有满之前，应该优先使用核心线程，
+// 只有阻塞队列满时，才申请最发线程
+func (p *Pool) retrieveWorker(isCore bool) (w *goWorker) {
+	spawnWorker := func(recycleTime time.Time) {
 		w = p.workerCache.Get().(*goWorker)
+		w.recycleTime = recycleTime
 		w.run()
 	}
 
 	p.lock.Lock()
+	defer p.lock.Unlock()
 
 	w = p.workers.detach()
 	if w != nil {
 		// 第一次从queue中尝试抓去一个worker
-		p.lock.Unlock()
-	} else if capacity := p.Cap(); capacity == -1 || capacity > p.Running() {
-		// 如果工作队列为空并且我们没有用完池容量，
+		return
+	}
+	if corePoolSize := p.CorePoolSize(); corePoolSize > p.Running() {
+		// 如果工作队列没有用完，
 		// 然后生成一个新的 worker goroutine
-		p.lock.Unlock()
-		spawnWorker()
-	} else {
-		// 否则，我们将不得不让它们保持阻塞状态，并等待至少一个worker被放回池中。
-		if p.options.Nonblocking {
-			p.lock.Unlock()
-			return
-		}
-	retry:
-		if p.options.MaxBlockingTasks != 0 && p.blockingNum >= p.options.MaxBlockingTasks {
-			p.lock.Unlock()
-			return
-		}
-		p.blockingNum++
-		p.cond.Wait() // 阻塞并等待一个可用worker
-		p.blockingNum--
-		var nw int
-		if nw = p.Running(); nw == 0 { // 清理程序唤醒
-			p.lock.Unlock()
-			if !p.IsClosed() {
-				spawnWorker()
-			}
-			return
-		}
-		if w = p.workers.detach(); w == nil {
-			if nw < capacity {
-				p.lock.Unlock()
-				spawnWorker()
-				return
-			}
-			goto retry
-		}
-
-		p.lock.Unlock()
+		// 核心线程生成一个最大时间，表示用不过期
+		spawnWorker(MaxTime)
+		return
+	}
+	// 如果仅仅申请核心线程，则申请失败，直接返回
+	if isCore {
+		return
+	}
+	if maximumPoolSize := p.Cap(); maximumPoolSize > p.Running() {
+		// 如果工作队列没有用完，
+		// 然后生成一个新的 worker goroutine
+		spawnWorker(time.Unix(0, 0))
+		return
 	}
 	return
 }
 
 // revertWorker 把一个worker放回到可用池中，循环使用这个协程数
 func (p *Pool) revertWorker(worker *goWorker) bool {
-	if capacity := p.Cap(); (capacity > 0 && p.Running() > capacity) || p.IsClosed() {
+	if capacity := p.Cap(); capacity > 0 && p.Running() > capacity || p.IsClosed() {
 		return false
 	}
-	worker.recycleTime = time.Now()
+
 	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	var oldRecycleTime = worker.recycleTime
+	worker.recycleTime = time.Now()
+	if worker.recycleTime.Before(oldRecycleTime) {
+		worker.recycleTime = oldRecycleTime
+	}
 
 	// 未来避免内存泄漏，增加一个double check
 	if p.IsClosed() {
-		p.lock.Unlock()
 		return false
 	}
 
 	err := p.workers.insert(worker)
 	if err != nil {
-		p.lock.Unlock()
 		return false
 	}
 
 	// 通知卡在“retrieveWorker()”中的调用者工作队列中有一个可用的worker
 	p.cond.Signal()
-	p.lock.Unlock()
 	return true
 }

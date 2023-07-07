@@ -1,4 +1,4 @@
-package gpools2
+package gpools
 
 // Logger 用于日志格式化输出
 type Logger interface {

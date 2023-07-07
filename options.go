@@ -23,13 +23,11 @@ type Options struct {
 	// PreAlloc 初始化Pool时是否进行内存预分配
 	PreAlloc bool
 
-	// 阻塞到poll.Submit的最大协程数量。0(默认值)代码没有任何限制
-	MaxBlockingTasks int
+	// MaximumPoolSize 最大协程数
+	MaximumPoolSize int
 
-	// Nonblocking 当 Nonblocking 为真时，Pool.Submit 永远不会被阻塞。
-	// 当 Pool.Submit 无法立即完成时，将返回 ErrPoolOverload。
-	// 当 Nonblocking 为真时，MaxBlockingTasks 不起作用。
-	Nonblocking bool
+	// pools中可以缓存的最大任务数
+	MaximumQueueTasks int
 
 	// PanicHandler 用于处理来自每个工作协程的panics。
 	// 如果为nil，panics将再次从工作协程中抛出。
@@ -53,24 +51,25 @@ func WithExpiryDuration(expiryDuration time.Duration) Option {
 	}
 }
 
-// WithPreAlloc 是否提前分配workers
-func WithPreAlloc(preAlloc bool) Option {
+//
+//// WithPreAlloc 是否提前分配workers
+//func WithPreAlloc(preAlloc bool) Option {
+//	return func(opts *Options) {
+//		opts.PreAlloc = preAlloc
+//	}
+//}
+
+// WithMaximumQueueTasks 当协程池没有空闲协程时，可以缓冲的最大协程数
+func WithMaximumQueueTasks(maximumQueueTasks int) Option {
 	return func(opts *Options) {
-		opts.PreAlloc = preAlloc
+		opts.MaximumQueueTasks = maximumQueueTasks
 	}
 }
 
-// WithMaxBlockingTasks 当协程池没有空闲协程时，可以阻塞的最大协程数
-func WithMaxBlockingTasks(maxBlockingTasks int) Option {
+// WithMaximumPoolSize 最大协程数
+func WithMaximumPoolSize(maximumPoolSize int) Option {
 	return func(opts *Options) {
-		opts.MaxBlockingTasks = maxBlockingTasks
-	}
-}
-
-// WithNonblocking 设置是否为阻塞，如果没有可用workers是，此值设置为true,则会返回nil
-func WithNonblocking(nonblocking bool) Option {
-	return func(opts *Options) {
-		opts.Nonblocking = nonblocking
+		opts.MaximumPoolSize = maximumPoolSize
 	}
 }
 

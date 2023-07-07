@@ -1,6 +1,8 @@
 package gpools
 
-import "time"
+import (
+	"time"
+)
 
 type workerStack struct {
 	items  []*goWorker
@@ -24,7 +26,17 @@ func (wq *workerStack) isEmpty() bool {
 }
 
 func (wq *workerStack) insert(worker *goWorker) error {
-	wq.items = append(wq.items, worker)
+	var items = make([]*goWorker, len(wq.items)+1)
+	var insertIdx = len(wq.items)
+	for i := len(wq.items) - 1; i >= 0; i-- {
+		if wq.items[i].recycleTime.After(worker.recycleTime) {
+			insertIdx = i
+		}
+	}
+	copy(items[:insertIdx], wq.items[:insertIdx])
+	items[insertIdx] = worker
+	copy(items[insertIdx+1:], wq.items[insertIdx:])
+	wq.items = items
 	return nil
 }
 
@@ -46,10 +58,8 @@ func (wq *workerStack) retrieveExpiry(duration time.Duration) []*goWorker {
 	if n == 0 {
 		return nil
 	}
-
 	expiryTime := time.Now().Add(-duration)
 	index := wq.binarySearch(0, n-1, expiryTime)
-
 	wq.expiry = wq.expiry[:0]
 	if index != -1 {
 		wq.expiry = append(wq.expiry, wq.items[:index+1]...)
