@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const maxBackoff = 64
+
 // Pool 接收客户端的请求，通过循环利用协程，以便限制协程数量为设置的协程数量
 type Pool struct {
 	// corePoolSize 核心协程数，即便空闲也不会被回收
@@ -22,14 +24,14 @@ type Pool struct {
 	// 阻塞的任务
 	jobQueue chan func()
 
+	// closeDispatch 关闭分发信号
+	closeDispatch chan bool
+
 	// running 当前运行的协程池数量
 	running int32
 
 	// lock 用于工作队列保护
 	lock sync.Locker
-
-	// submitLock 用于提交保护
-	submitLock sync.Locker
 
 	// workers 存储可用的 workers 分片，maximumPoolSize
 	workers workerArray
@@ -110,8 +112,8 @@ func NewPool(corePoolSize int, options ...Option) (*Pool, error) {
 		corePoolSize:     int32(corePoolSize),
 		maximumPoolSize:  int32(opts.MaximumPoolSize),
 		maximumQueueSize: int32(opts.MaximumQueueTasks),
+		closeDispatch:    make(chan bool, 1),
 		lock:             internal.NewSpinLock(),
-		submitLock:       internal.NewSpinLock(),
 		options:          opts,
 	}
 
@@ -154,7 +156,7 @@ func (p *Pool) dispatch() {
 			w = p.utilRetrieveWorker(true)
 			// 执行任务
 			w.task <- job
-		default:
+		case <-p.closeDispatch:
 			return
 		}
 	}
@@ -162,14 +164,18 @@ func (p *Pool) dispatch() {
 
 func (p *Pool) utilRetrieveWorker(isCore bool) *goWorker {
 	var w *goWorker
+	backoff := 1
 	for {
 		// 找到一个worker
 		if w = p.retrieveWorker(isCore); w != nil {
 			// Got job
 			return w
-		} else {
-			//让出时间片，先让别的协议执行，它执行完，再回来执行此协程
+		}
+		for i := 0; i < backoff; i++ {
 			runtime.Gosched()
+		}
+		if backoff < maxBackoff {
+			backoff <<= 1
 		}
 	}
 }
@@ -183,12 +189,8 @@ func (p *Pool) Submit(task func()) error {
 	}
 	// 如果运行线程数小于pool的池数量，则直接申请一个协程运行任务
 	if p.Running() < int(p.corePoolSize) {
-		p.submitLock.Lock()
-		defer p.submitLock.Unlock()
-		// 需要再次判断，多个协程可能同步满足if条件
-		// 如果double check时不满足，需要进一步判断阻塞队列及最大协程条件
-		if p.Running() < int(p.corePoolSize) {
-			var w = p.utilRetrieveWorker(true)
+		var w = p.utilRetrieveWorker(true)
+		if w != nil {
 			w.task <- task
 			return nil
 		}
@@ -200,12 +202,8 @@ func (p *Pool) Submit(task func()) error {
 	}
 	// 如果运行线程数小于pool的最大协程数量，则直接申请一个协程运行任务
 	if p.Running() < int(p.maximumPoolSize) {
-		p.submitLock.Lock()
-		defer p.submitLock.Unlock()
-		// 需要再次判断，多个协程可能同步满足if条件
-		// 如果double check时不满足，则返回池满
-		if p.Running() < int(p.maximumPoolSize) {
-			var w = p.utilRetrieveWorker(false)
+		var w = p.utilRetrieveWorker(false)
+		if w != nil {
 			w.task <- task
 			return nil
 		}
@@ -250,6 +248,7 @@ func (p *Pool) Release() {
 	p.lock.Unlock()
 	// 此时有可能一些调用方在等待retrieveWorkers()，所以我们需要唤醒他们，避免他们无穷的等待
 	p.cond.Broadcast()
+	p.closeDispatch <- true
 }
 
 // Reboot 重启一个关闭的池
