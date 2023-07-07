@@ -10,7 +10,7 @@ import (
 )
 
 func TestName(t *testing.T) {
-	var pools, err = NewPool(5, WithMaximumQueueTasks(1000), WithMaximumPoolSize(20), WithPanicHandler(func(err interface{}) {
+	var pools, err = NewPool(5, WithMaximumQueueTasks(100), WithMaximumPoolSize(20), WithPanicHandler(func(err interface{}) {
 		log.Print(">>>>>>>>>>>callback too fast, match threadpool rejected handler(run now). error msg,", err)
 
 	}))
@@ -18,7 +18,7 @@ func TestName(t *testing.T) {
 		fmt.Println(err)
 	}
 
-	for i := 0; i < 200; i++ {
+	for i := 0; i < 121; i++ {
 		go func(ii int) {
 			err = pools.Submit(funcName(pools, ii))
 			if err != nil {
