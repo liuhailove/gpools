@@ -1,5 +1,12 @@
 # gpools
-主要提供go-lang协程池实现
+一个高效的golang协程池组件
+# 参数
+- corePoolSize 核心协程数，一旦被分配不会释放
+- maximumQueueTasks 最大阻塞队列，当并发度超过核心协程数时，多出的任务将会被放到阻塞队列中，直到有合适的协程处理
+- maximumPoolSize 当阻塞队列满时，会继续分配协程处理任务，当空闲时会自动回收，当并发读超过此值时则报协程池满异常
+- expiryDuration 空闲协程回收时间，只有maximumPoolSize-corePoolSize中的协程才会被回收，默认1s后回收
+- panicHandler 协程异常处理，如果协程处理出现异常，协程会被回收，包含corePoolSize中的协程
+- logger 日志
 # 运行步骤
 - 1.通过NewPool方法构造一个协程池，其中如下代码定义了生成goWorker的方法
 ```go
