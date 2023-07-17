@@ -25,7 +25,11 @@ task: make(chan func(), workerChanCap),
 ```
 
 - 2.其中一个协程用于清理过期的goWorker，当task不在繁忙时，协程会被回收
-- 3.通过Submit提交一个任务，submit中通过retrieveWorker获取一个可用的goWorker，然后把任务通过chan发送给goWorker
+- 3.通过Submit提交一个任务，submit中通过retrieveWorker获取一个可用的goWorker，然后把任务通过chan发送给goWorker, <br/>
+  当运行任务数lt;corePoolSize 时，直接分配一个核心协程，并发task分配给当前worker, <br/>
+  当运行任务数gt;corePoolSize 但是lt;maximumQueueSize时，会进入到阻塞队列，等待阻塞队列关联协程调度, <br/>
+  当运行任务数gt; maximumQueueSize时,继续申请协程，直到maximumPoolSize,分配的协程用于立刻处理task, <br/>
+  当并发运行任务数gt;maximumPoolSize,返回协程池满错误 <br/>
 - 4.goWorker增加正在运行的任务数量，同时遍历task chan，回调业务方法，回调后会把goWorker放入到队列中，以便循环使用
 - 5.goWorker会一直for range task chan，直到有任务或者回调发生异常或者task为空
 - 6.如果回调方法发生异常，则会销毁go协程，并通知池可以重新创建一个协程，同时把运行协程数减一
