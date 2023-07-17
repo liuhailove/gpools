@@ -16,7 +16,7 @@
 - 1.通过NewPool方法构造一个协程池，其中如下代码定义了生成goWorker的方法
 
 ```go
-    p.workerCache.New = func () interface{} {
+p.workerCache.New = func () interface{} {
 return &goWorker{
 pool: p,
 task: make(chan func(), workerChanCap),
