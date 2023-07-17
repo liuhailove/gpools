@@ -25,3 +25,20 @@
 - 7.若超过过期时间没有任务要运行，则会执行清理程序
 - 8.清理程序会把过期的task设置为空，以便for range中断，进入协程回收
 
+# 案例
+- 1.引入SDK
+```markdown
+ github.com/liuhailove/gpools v1.0.0
+```
+- 2.初始化gpools
+```go
+	var runTaskPool, _ = gpools.NewPool(2*runtime.NumCPU(), gpools.WithMaximumQueueTasks(50000), gpools.WithMaximumPoolSize(int(e.opts.MaxConcurrencyNum)), gpools.WithPanicHandler(func(err interface{}) {
+		e.log.Error(">>>>>>>>>>>callback too fast, match threadpool rejected handler(run now). error msg：%#v", err)
+	}))
+```
+- 3.提交任务
+```go
+var err = e.runTaskPool.Submit(func() {
+			// your code
+		})
+```
